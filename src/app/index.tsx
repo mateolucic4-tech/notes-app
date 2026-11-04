@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { Session } from '@supabase/supabase-js';
 import { ActivityIndicator, FlatList, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { supabase } from '../lib/supabase';
 
 type Note = { id: string; content: string; created_at?: string };
 
 export default function NotesScreen() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [register, setRegister] = useState(false);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [authMessage, setAuthMessage] = useState('');
   const [content, setContent] = useState('');
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
@@ -25,28 +33,55 @@ export default function NotesScreen() {
 
   useEffect(() => {
     let active = true;
-    async function initialize() {
-      setLoading(true);
-      const { data, error } = await supabase.auth.getSession();
-      if (error) {
-        if (active) setMessage(`Greška sesije: ${error.message}`);
-        if (active) setLoading(false);
-        return;
-      }
-      if (!data.session) {
-        const { error: signInError } = await supabase.auth.signInAnonymously();
-        if (signInError) {
-          if (active) setMessage(`Anonimna prijava nije uspjela: ${signInError.message}. Provjeri je li Anonymous Sign-Ins uključen u Supabaseu.`);
-          if (active) setLoading(false);
-          return;
-        }
-      }
-      if (active) await loadNotes();
-      if (active) setLoading(false);
-    }
-    initialize();
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) setAuthMessage(error.message);
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, next) => {
+      setSession(next);
+      setNotes([]);
+      setMessage('');
+      setLoading(!!next);
+    });
+    return () => { active = false; subscription.unsubscribe(); };
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    let active = true;
+    setLoading(true);
+    loadNotes().finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [loadNotes]);
+  }, [session?.user.id, loadNotes]);
+
+  // Supabase password auth requires an email identity. This deterministic,
+  // app-specific alias lets users sign in using only a username.
+  // Email confirmation must be disabled for this prototype (see README).
+  const loginEmail = (name: string) => `${name.toLowerCase()}@notes-app.example.com`;
+
+  const submitAuth = async () => {
+    const name = username.trim().toLowerCase();
+    if (!/^[a-z0-9_]{3,24}$/.test(name)) {
+      setAuthMessage('Username mora imati 3–24 znaka (a-z, 0-9, _).');
+      return;
+    }
+    if (password.length < 8) {
+      setAuthMessage('Password mora imati barem 8 znakova.');
+      return;
+    }
+    setAuthBusy(true);
+    setAuthMessage('');
+    const email = loginEmail(name);
+    const { data, error } = register
+      ? await supabase.auth.signUp({ email, password, options: { data: { username: name } } })
+      : await supabase.auth.signInWithPassword({ email, password });
+    if (error) setAuthMessage(error.message);
+    else if (register && !data.session) setAuthMessage('Račun je kreiran, ali nije aktivan. Provjeri Supabase Email confirmation postavku.');
+    setPassword('');
+    setAuthBusy(false);
+  };
 
   const saveNote = async () => {
     const trimmed = content.trim();
@@ -67,10 +102,34 @@ export default function NotesScreen() {
     setSaving(false);
   };
 
+  if (authLoading) return <SafeAreaView style={styles.safe}><ActivityIndicator style={{ flex: 1 }} size="large" /></SafeAreaView>;
+
+  if (!session) return (
+    <SafeAreaView style={styles.safe}>
+      <View style={[styles.container, { justifyContent: 'center' }]}>
+        <Text style={styles.title}>Notes App</Text>
+        <Text style={styles.subtitle}>{register ? 'Napravi račun' : 'Prijavi se'} za pristup svojim bilješkama.</Text>
+        <TextInput style={styles.input} placeholder="Username" autoCapitalize="none" autoCorrect={false}
+          value={username} onChangeText={setUsername} accessibilityLabel="Username" />
+        <TextInput style={styles.input} placeholder="Password" secureTextEntry
+          value={password} onChangeText={setPassword} accessibilityLabel="Password" />
+        {!!authMessage && <Text style={styles.message}>{authMessage}</Text>}
+        <Pressable style={[styles.button, authBusy && styles.disabled]} onPress={submitAuth} disabled={authBusy}>
+          <Text style={styles.buttonText}>{authBusy ? 'Pričekaj...' : register ? 'Registriraj se' : 'Login'}</Text>
+        </Pressable>
+        <Pressable onPress={() => { setRegister(!register); setAuthMessage(''); }}>
+          <Text style={[styles.subtitle, { textAlign: 'center', color: '#3157d5' }]}>
+            {register ? 'Već imaš račun? Login' : 'Nemaš račun? Register'}
+          </Text>
+        </Pressable>
+      </View>
+    </SafeAreaView>
+  );
+
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
-        <Text style={styles.title}>Moje bilješke</Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={styles.title}>Moje bilješke</Text><Pressable onPress={() => supabase.auth.signOut()}><Text style={{ color: '#3157d5', fontWeight: '700' }}>Logout</Text></Pressable></View>
         <Text style={styles.subtitle}>Bilješke se spremaju u Supabase i ponovno učitavaju pri otvaranju aplikacije.</Text>
         <TextInput
           style={styles.input}
